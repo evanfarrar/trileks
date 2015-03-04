@@ -22,7 +22,6 @@ use rand::distributions::{IndependentSample, Range};
 use uuid::Uuid;
 
 use sprite::*;
-use graphics::ImageSize;
 use ai_behavior::{
     Action,
     Sequence,
@@ -39,22 +38,6 @@ fn random_grid_position<R: Rng>(random_horizontal: &Range<usize>, random_vertica
     (random_horizontal.ind_sample(rng), random_vertical.ind_sample(rng))
 }
 
-fn grid_position_as_scene_position(grid_position: (usize,usize)) -> (f64,f64) {
-    let (grid_horizontal,grid_vertical) = grid_position;
-    ((grid_horizontal*100+50) as f64, (grid_vertical*100+50) as f64)
-}
-
-fn scene_position_as_grid_position(scene_position: (f64,f64)) -> (usize,usize) {
-    let (scene_horizontal,scene_vertical) = scene_position;
-    ((((scene_horizontal as usize)-50)/100), (((scene_vertical as usize)-50)/100))
-}
-
-fn collides<I: ImageSize>(sprite1: &Sprite<I>, sprite2: &Sprite<I>) -> bool {
-    let sprite1_position = scene_position_as_grid_position(sprite1.position());
-    let sprite2_position = scene_position_as_grid_position(sprite2.position());
-    sprite1_position == sprite2_position
-}
-
 struct ActorInProgress {
     grid_x: usize,
     grid_y: usize,
@@ -68,7 +51,7 @@ impl ActorInProgress {
         (self.grid_y*100+50) as f64
     }
     fn to_actor(&self, sprite_uuid: uuid::Uuid) -> Actor {
-        Actor{ grid_x: self.grid_x, grid_y: self.grid_y, sprite_uuid: sprite_uuid, alive: self.alive }
+        Actor{ grid_x: self.grid_x, grid_y: self.grid_y, sprite_uuid: sprite_uuid, alive: self.alive, moved: false }
     }
 }
 struct Actor {
@@ -76,14 +59,11 @@ struct Actor {
     grid_y: usize,
     sprite_uuid: uuid::Uuid,
     alive: bool,
+    moved: bool,
 }
 impl Actor {
     fn collides(&self, other_actor: &Actor) -> bool {
         other_actor.grid_x == self.grid_x && other_actor.grid_y == self.grid_y
-    }
-
-    fn scene_position(&self) -> (f64,f64) {
-        (self.scene_x(), self.scene_y())
     }
 
     fn scene_x(&self) -> f64 {
@@ -92,6 +72,32 @@ impl Actor {
 
     fn scene_y(&self) -> f64 {
         (self.grid_y*100+50) as f64
+    }
+
+    fn move_towards(&mut self, other_actor: &Actor) {
+        let (frog_pos_h, frog_pos_v) = (other_actor.grid_x,other_actor.grid_y);
+        let (robot_pos_h, robot_pos_v) = (self.grid_x,self.grid_y);
+
+        if frog_pos_h > robot_pos_h {
+            self.grid_x = self.grid_x + 1;
+        } else if frog_pos_h < robot_pos_h {
+            self.grid_x = self.grid_x - 1;
+        }
+        if frog_pos_v > robot_pos_v {
+            self.grid_y = self.grid_y + 1;
+        } else if frog_pos_v < robot_pos_v {
+            self.grid_y = self.grid_y - 1;
+        }
+    }
+
+    fn move_by(&mut self, x: isize, y: isize) {
+        let new_x = (self.grid_x as isize)+x;
+        let new_y = (self.grid_y as isize)+y;
+        if new_x >= 0 && new_y >= 0 && new_x < 8 && new_y < 6 {
+            self.grid_x = self.grid_x+x as usize;
+            self.grid_y = self.grid_y+y as usize;
+            self.moved = true;
+        }
     }
 }
 
@@ -121,7 +127,7 @@ fn main() {
     let (pos_h, pos_v) = random_grid_position(&random_horizontal, &random_vertical, &mut rng);
     let frog_in_progress = ActorInProgress{ grid_x: pos_h, grid_y: pos_v, alive: true  };
     frog_texture.set_position(frog_in_progress.scene_x(), frog_in_progress.scene_y());
-    let frog = frog_in_progress.to_actor(scene.add_child(frog_texture));
+    let mut frog = frog_in_progress.to_actor(scene.add_child(frog_texture));
 
     let tex = Path::new("./robot.png");
     let tex = Rc::new(Texture::from_path(&tex).unwrap());
@@ -130,11 +136,10 @@ fn main() {
     let (pos_h, pos_v) = random_grid_position(&random_horizontal, &random_vertical, &mut rng);
     let robot_in_progress = ActorInProgress{ grid_x: pos_h, grid_y: pos_v, alive: true  };
     robot_texture.set_position(robot_in_progress.scene_x(), robot_in_progress.scene_y());
-    let robot = robot_in_progress.to_actor(scene.add_child(robot_texture));
+    let mut robot = robot_in_progress.to_actor(scene.add_child(robot_texture));
 
     let ref mut gl = GlGraphics::new(opengl);
     let window = RefCell::new(window);
-    let mut frog_alive = true;
 
     for e in piston::events(&window) {
         use piston::event::{ PressEvent, RenderEvent };
@@ -146,10 +151,10 @@ fn main() {
                 scene.draw(&c, gl);
             });
         }
-        let collision = collides(scene.child(frog.sprite_uuid.clone()).unwrap(),scene.child(robot.sprite_uuid.clone()).unwrap());
-        if collision && frog_alive {
+        let collision = frog.collides(&robot);
+        if collision && frog.alive {
             println!("COLLISION");
-            frog_alive = false;
+            frog.alive = false;
             let seq = Sequence(vec![
                 Action(Blink(1.0, 5)),
                 Action(ScaleBy(0.5, 0.0, -0.5)),
@@ -157,61 +162,43 @@ fn main() {
             ]);
             scene.run(frog.sprite_uuid.clone(), &seq);
         }
-        if frog_alive {
+        if frog.alive {
             if let Some(Button::Keyboard(key)) = e.press_args() {
-                let mut frog_moved = false;
+                frog.moved = false;
                 if key == Key::Q {
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveBy(0.5, -100.0, -100.0)));
-                    frog_moved = true;
+                    frog.move_by(-1,-1);
                 }
                 if key == Key::W {
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveBy(0.5, 0.0, -100.0)));
-                    frog_moved = true;
+                    frog.move_by(0,-1);
                 }
                 if key == Key::E {
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveBy(0.5, 100.0, -100.0)));
-                    frog_moved = true;
+                    frog.move_by(1,-1);
                 }
                 if key == Key::A {
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveBy(0.5, -100.0, 0.0)));
-                    frog_moved = true;
+                    frog.move_by(-1,0);
                 }
                 if key == Key::D {
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveBy(0.5, 100.0, 0.0)));
-                    frog_moved = true;
+                    frog.move_by(1,0);
                 }
                 if key == Key::Z {
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveBy(0.5, -100.0, 100.0)));
-                    frog_moved = true;
+                    frog.move_by(-1,1);
                 }
                 if key == Key::X {
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveBy(0.5, 0.0, 100.0)));
-                    frog_moved = true;
+                    frog.move_by(0,1);
                 }
                 if key == Key::C {
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveBy(0.5, 100.0, 100.0)));
-                    frog_moved = true;
+                    frog.move_by(1,1);
                 }
                 if key == Key::T {
-                    let (pos_h, pos_v) = grid_position_as_scene_position(random_grid_position(&random_horizontal, &random_vertical, &mut rng));
-                    scene.run(frog.sprite_uuid.clone(),&Action(MoveTo(0.0, pos_h, pos_v)));
+                    let (pos_h, pos_v) = random_grid_position(&random_horizontal, &random_vertical, &mut rng);
+                    frog.grid_x = pos_h;
+                    frog.grid_y = pos_v;
+                    scene.run(frog.sprite_uuid.clone(),&Action(MoveTo(0.0, frog.scene_x(), frog.scene_y())));
                 }
-                if frog_moved {
-                    let (frog_pos_h, frog_pos_v) = scene.child(frog.sprite_uuid.clone()).unwrap().position();
-                    let (robot_pos_h, robot_pos_v) = scene.child(robot.sprite_uuid.clone()).unwrap().position();
-                    let mut move_h = 0.0;
-                    let mut move_v = 0.0;
-                    if frog_pos_h > robot_pos_h {
-                        move_h = 100.0;
-                    } else if frog_pos_h < robot_pos_h {
-                        move_h = -100.0;
-                    }
-                    if frog_pos_v > robot_pos_v {
-                        move_v = 100.0;
-                    } else if frog_pos_v < robot_pos_v {
-                        move_v = -100.0;
-                    }
-                    scene.run(robot.sprite_uuid.clone(), &Action(MoveBy(0.75, move_h, move_v)));
+                if frog.moved {
+                    scene.run(frog.sprite_uuid.clone(),&Action(MoveTo(0.5, frog.scene_x(), frog.scene_y())));
+                    robot.move_towards(&frog);
+                    scene.run(robot.sprite_uuid.clone(), &Action(MoveTo(0.75, robot.scene_x(), robot.scene_y())));
                 }
             }
         }
